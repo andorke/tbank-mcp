@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ClientCapabilities, ElicitationCapability, ToolAnnotations
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from . import client, trace
 from .client import (MobileSession, TbankApiError, SessionExpired,
                      PaymentConfirmationRequired, ms_for_period, vertical,
@@ -330,7 +330,10 @@ async def _elicit_or(ctx, message: str, schema):
     if not _elicitation_available(ctx):
         return ELICIT_UNAVAILABLE, None
     try:
-        res = await ctx.elicit(message=message, schema=schema)
+        # Structured-input hosts accept one-line display text. Preserve every
+        # term, without truncating it; only render our layout whitespace inline.
+        display_message = message.replace("\r\n", "\n").replace("\n", " · ").replace("\t", " ")
+        res = await ctx.elicit(message=display_message, schema=schema)
     except Exception:
         # McpError from send_request (client errored out / its form timed out).
         # NOT "unavailable": the user was asked and did not answer — for money
@@ -341,7 +344,20 @@ async def _elicit_or(ctx, message: str, schema):
     return res.action, None
 
 
-class _TransferGateForm(BaseModel):
+def _portable_elicitation_schema(schema: dict) -> None:
+    # Codex's typed MCP form root accepts $schema/type/properties/required,
+    # unlike a general JSON Schema document. Pydantic's generated class metadata
+    # must not prevent the human confirmation from ever reaching the host.
+    # Field labels, enums, required fields and response validation stay intact.
+    schema.pop("title", None)
+    schema.pop("description", None)
+
+
+class _ElicitationForm(BaseModel):
+    model_config = ConfigDict(json_schema_extra=_portable_elicitation_schema)
+
+
+class _TransferGateForm(_ElicitationForm):
     """No fields on purpose: the client's Accept button IS «Перевести», Decline
     IS «Отмена» — a deterministic action, not a checkbox an auto-fill could tick."""
 
@@ -371,6 +387,7 @@ def _choice_form(prompt: str, options: list[str]):
     from pydantic import Field, create_model
     return create_model(
         "_ChoiceForm",
+        __base__=_ElicitationForm,
         choice=(str, Field(description=prompt, json_schema_extra={"enum": options})))
 
 
