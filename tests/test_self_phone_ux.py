@@ -47,26 +47,38 @@ async def main():
         # Without a source-message id, even self cannot silently execute.
         b.verified = True
         args['request_id'] = ''
-        assert 'НЕ ВЫПОЛНЕН' in await server.transfer(**args)
-        assert pay.call_count == 1
+        for bad_id in ('', 'invalid', None):
+            args['request_id'] = bad_id
+            ctx = FakeCtx()
+            result = await server.transfer(**args, ctx=ctx)
+            assert 'request_id=telegram:' in result
+            assert not ctx.asked
+            assert pay.call_count == 1
+        # Same original instruction retried correctly: no question, one payment.
+        args['request_id'] = 'telegram:776201:10006'
+        ctx = FakeCtx()
+        assert await server.transfer(**args, ctx=ctx) == 'PAID'
+        assert not ctx.asked
+        assert 'Повтор поручения' in await server.transfer(**args, ctx=ctx)
+        assert pay.call_count == 2
         # Different phone still needs the human button.
         b.phone = '+79991234576'; args['request_id'] = 'telegram:776201:10003'
         assert 'НЕ ВЫПОЛНЕН' in await server.transfer(**args)
-        assert pay.call_count == 1
+        assert pay.call_count == 2
         # External decline and changed fee cannot pay; rotated handle alone can.
         ctx = FakeCtx(action='decline')
         assert 'Отменено' in await server.transfer(**args, ctx=ctx)
-        assert pay.call_count == 1
+        assert pay.call_count == 2
         assert len(ctx.asked[-1][0]) < 240
         assert await server.transfer(**args, ctx=FakeCtx()) == 'PAID'
         b.phone = PHONE; b.fee = 1; args['request_id'] = 'telegram:776201:10004'
         assert 'нулевая комиссия' in await server.transfer(**args)
-        assert pay.call_count == 2
+        assert pay.call_count == 3
         # Ambiguous bank never silently picks a candidate.
         original = b.resolve_recipient
         b.resolve_recipient = lambda phone: original(phone) * 2
         args['request_id'] = 'telegram:776201:10005'
         assert 'Укажи банк' in await server.transfer(**args)
-        assert pay.call_count == 2
+        assert pay.call_count == 3
     print('self-phone UX: verified owner, deduplication, rotating handles, external consent, fee and ambiguity: PASS')
 asyncio.run(main())

@@ -2726,6 +2726,8 @@ async def transfer(amount: float, to_account: str, description: str = "",
                    ctx: Context = None, request_id: str = "") -> str:
     """Перевод реальных денег по телефону. Свой подтверждённый банком номер — без
     кнопки, с request_id=telegram:<topic>:<message_id> для защиты от повтора.
+    request_id передавай всегда из исходного сообщения; если пропущен, повтори
+    вызов с тем же исходным id без вопроса пользователю. Не выдумывай id.
     Другому человеку — одна короткая карточка подтверждения; не спрашивай заранее.
     Банк выбирается через bank_member_id из transfer_sbp_resolve; pointer_link_id
     обновляется автоматически. from_account — выбранный счёт списания.
@@ -2734,10 +2736,15 @@ async def transfer(amount: float, to_account: str, description: str = "",
     """
     from . import transfer_quote, own_requests
     own = False
-    if own_requests.valid_id(request_id) and provider == 'p2p-anybank' and not force:
+    if provider == 'p2p-anybank' and not force:
         session = _require()
         await asyncio.to_thread(session.ensure_fresh)
         own = await asyncio.to_thread(transfer_quote.verified_own_phone, session, to_account)
+    if own and not own_requests.valid_id(request_id):
+        return ('Перевод НЕ ВЫПОЛНЕН: свой номер подтверждён банком. '
+                'Повтори вызов с request_id=telegram:<topic>:<message_id> исходного '
+                'поручения для защиты от дублей; не спрашивай подтверждение пользователя '
+                'и не придумывай новый id.')
     if own and not from_account:
         return 'Укажи счёт списания. Перевод не отправлен.'
     if not own:
