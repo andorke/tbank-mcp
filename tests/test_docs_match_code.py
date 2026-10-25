@@ -222,7 +222,7 @@ def test_every_tool_declares_what_it_does_to_the_world():
     # step), so both are MONEY. train_book only reserves seats — they lapse in
     # about fifteen minutes on their own — and train_refund is a cancellation,
     # which by the same rule as ticket_cancel is recoverable, not a debit.
-    MONEY = {"transfer", "transfer_requisites", "grocery_checkout", "ticket_pay",
+    MONEY = {"transfer", "transfer_own", "transfer_requisites", "grocery_checkout", "ticket_pay",
              "pay_bill", "confirm_payment", "train_pay", "flight_book"}
     # WRITE changes something that costs nothing. They must NOT claim to be
     # read-only — `readOnlyHint: true` states that a tool does not modify its

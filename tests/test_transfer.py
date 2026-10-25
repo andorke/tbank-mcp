@@ -142,6 +142,10 @@ class CaptureSession(MobileSession):
                  "is_default_bank": True, "workflow_type": "SBPTransfer",
                  "is_tbank": False}]
 
+    def payment_commission(self, body=None):
+        amount = float(body['payParameters']['moneyAmount'])
+        return {'unfinishedFlag': False, 'value': {'value': 0}, 'total': {'value': amount}}
+
     def _call_signed(self, template_key, body_str, extra_query=None):
         self.url, self.headers, self.body = self._signed_parts(
             template_key, body_str, extra_query)
@@ -942,6 +946,10 @@ class BillSession(CaptureSession):
 
     def find_provider(self, provider_id, group="", max_pages=7):
         return dict(MOSENERGO) if provider_id == MOSENERGO["id"] else {}
+
+    # Unlike CaptureSession's phone-transfer quote spy, bill tests deliberately
+    # execute the real parser and only stub the network one layer below it.
+    payment_commission = MobileSession.payment_commission
 
     def _call_read(self, template_key, *, overrides=None, body=None,
                    path_override=None):

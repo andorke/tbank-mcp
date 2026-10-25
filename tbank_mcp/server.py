@@ -162,6 +162,8 @@ TOOL_KINDS: dict[str, tuple[str, str]] = {
     "payment_providers": ("Каталог платёжных провайдеров", READ),
     "pay_bill": ("Оплата счёта", MONEY),
     "transfer": ("Перевод денег", MONEY),
+    "transfer_own": ("Перевод между собственными счетами", MONEY),
+    "banking_confirmation_test": ("Проверка подтверждения без платежа", READ),
     "transfer_requisites": ("Перевод по реквизитам юрлицу", MONEY),
     # Completes a payment the bank is holding at WAITING_CONFIRMATION — the second
     # half of a debit, so MONEY + destructiveHint like the three that start one.
@@ -442,7 +444,10 @@ async def _money_gate(ctx, message: str, *, safe: str = "деньги на ме�
     honest when nothing at all ran before the button, so a tool that did
     preparatory work the human can observe (grocery quotes a delivery slot) passes
     a narrower one instead of promising more than the code can keep."""
-    outcome, _ = await _elicit_or(ctx, message, _TransferGateForm)
+    try:
+        outcome, _ = await asyncio.wait_for(_elicit_or(ctx, message, _TransferGateForm), timeout=120)
+    except asyncio.TimeoutError:
+        outcome = ELICIT_ERROR
     if outcome == ELICIT_ACCEPT:
         return None
     if outcome == ELICIT_UNAVAILABLE:
@@ -2704,7 +2709,7 @@ async def transfer(amount: float, to_account: str, description: str = "",
                    ctx: Context = None) -> str:
     """Перевод (РЕАЛЬНЫЕ ДЕНЬГИ). Подтверждение — кнопка, не текст: тул сам покажет
     пользователю выбор банка (если их несколько) и кнопки «Перевести/Отмена»
-    (для сумм от TBANK_CONFIRM_ABOVE). НЕ спрашивай «да/нет» заранее — вызывай, когда
+    на любую сумму, независимо от TBANK_CONFIRM_ABOVE. НЕ спрашивай «да/нет» заранее — вызывай, когда
     сумма и получатель известны; согласие даёт кнопка. Клиент без элиситации
     получает отказ «ПЛАТЁЖ НЕ ВЫПОЛНЕН» — деньги там не двигаются вообще.
 
@@ -2718,9 +2723,9 @@ async def transfer(amount: float, to_account: str, description: str = "",
     кандидат; при нескольких без дефолта вернётся RECIPIENT_MULTIPLE_BANKS со списком.
     Перевод на счёт в Т-Банке (получатель — клиент Т-Банка): передай его
     pointer_link_id, а bank_member_id оставь пустым — у внутреннего перевода его нет.
-    Между своими счетами (provider='transfer-inner') НЕ реализовано — тело платежа
-    не сверено с реальным перехватом трафика; переводи между своими счетами в
-    приложении.
+    Между своими счетами: provider='transfer-inner' перенаправляет в transfer_own.
+    Только явные from_account/to_account, собственные Current/Saving RUB без комиссии.
+    Без кнопки только через transfer_own с request_id поручения. Live списание не проверено.
     По юрлицу/ИП по реквизитам — это НЕ этот тул: девять полей реквизитов сюда не
     помещаются. Бери transfer_requisites(amount, qr=…|account_number/bik/inn/name,
     comment=…); прочитать QR со счёта — payment_qr(qr). transfer(...,
@@ -2730,6 +2735,8 @@ async def transfer(amount: float, to_account: str, description: str = "",
     после того, как пользователь ПРОВЕРИЛ в приложении, что деньги не ушли.
 
     Возвращает paymentId — по нему потом payment_receipt(). Больше его взять негде."""
+    if provider == "transfer-inner":
+        return "Для собственных счетов используй transfer_own с request_id исходного поручения."
     # Not just «> 0»: NaN and ±inf make every float comparison below False, so a
     # junk amount used to reach the человека as «Перевести nan RUB → …?» — a
     # question nobody can answer — after a resolve_recipient round-trip and a
@@ -2738,9 +2745,8 @@ async def transfer(amount: float, to_account: str, description: str = "",
     if _payable_amount(amount) is None:
         return (f"Сумма должна быть положительным числом, получено {amount!r}.")
     # No button possible → refuse before the recipient resolve round-trip.
-    refusal = _button_required(ctx, amount)
-    if refusal is not None:
-        return refusal
+    if not _elicitation_available(ctx):
+        return _no_button_refusal()
     # Resolve the recipient (and let the human pick a bank) BEFORE the sync body
     # writes anything to the journal.
     prep = await _transfer_prepare(ctx, amount, to_account, provider, pointer_link_id)
@@ -2753,14 +2759,35 @@ async def transfer(amount: float, to_account: str, description: str = "",
     from_account, src_refusal = await _resolve_source(ctx, from_account)
     if src_refusal is not None:
         return src_refusal
-    who = (prep.get("who") if prep else "") or (masked_fio or to_account)
-    if _needs_button(amount):
-        gate = await _money_gate(ctx, f"Перевести {_money(amount, 'RUB')} → {who}?")
+    if not from_account:
+        try:
+            from_account = await asyncio.to_thread(lambda: _require()._source_account())
+        except Exception as e:
+            return _err_session(e)
+    if provider != "p2p-anybank":
+        return "Этот маршрут не поддержан; используй transfer_own или transfer_requisites."
+    from . import transfer_quote
+    try:
+        s = _require()
+        await asyncio.to_thread(s.ensure_fresh)
+        approved = await asyncio.to_thread(transfer_quote.p2p, s, amount, to_account,
+            from_account, pointer_link_id, bank_member_id, description)
+        deadline = transfer_quote.monotonic() + 120
+        gate = await _money_gate(ctx, ("ПОВТОР ПОСЛЕ СВЕРКИ ОПЕРАЦИЙ. " if force else "") + transfer_quote.display(approved))
         if gate is not None:
             return gate
-    return await asyncio.to_thread(
-        _do_transfer, amount, to_account, description, provider, bank_member_id,
-        masked_fio, pointer_link_id, from_account, force)
+        # Exact re-quote immediately before the existing journalled executor.
+        current = await asyncio.to_thread(transfer_quote.p2p, s, amount, to_account,
+            from_account, pointer_link_id, bank_member_id, description)
+        if current != approved:
+            return "Условия перевода изменились. Платёж не отправлен; нужно новое подтверждение."
+        if transfer_quote.monotonic() >= deadline:
+            return "Подтверждение истекло. Платёж не отправлен; нужно новое подтверждение."
+        return await asyncio.to_thread(
+            _do_transfer, amount, to_account, description, provider, bank_member_id,
+            approved['recipient'], pointer_link_id, from_account, force)
+    except Exception as e:
+        return _err_session(e)
 
 
 def _do_transfer(amount: float, to_account: str, description: str = "",
@@ -3073,6 +3100,40 @@ async def _transfer_gate(ctx, amount, qr, name) -> str | None:
             "повтори transfer_requisites(...) с теми же аргументами.")
 
 
+def _legal_transfer_prepare(amount, qr, comment, account_number, bik, inn, name,
+                            kpp, corr_account, bank_name, nds, personal_account, from_account):
+    from . import transfer_quote
+    s = _require(); s.ensure_fresh()
+    explicit = {"bankAcnt": account_number, "bankBik": bik, "inn": inn,
+                "addressee": name, "kpp": kpp, "bankCorrAcnt": corr_account,
+                "bankName": bank_name, "comment": comment, "nds": nds,
+                "account": personal_account}
+    fields, qr_amount, from_qr = _legal_requisites(s, qr=qr, explicit=explicit)
+
+    amount = float(amount or 0) or float(qr_amount or 0)
+    if _payable_amount(amount) is None:
+        return ("В QR суммы нет, а amount не задан — передай amount=… явно."
+                if qr and not amount
+                else f"Сумма должна быть положительным числом, получено {amount!r}.")
+
+    prov = s.find_provider("transfer-legal", group=_LEGAL_GROUP)
+    if not prov:
+        return ("Не удалось получить схему полей провайдера transfer-legal из "
+                f"каталога (группа «{_LEGAL_GROUP}»), а без неё реквизиты не с чем "
+                "сверить — платёж не отправлен. Проверь сессию и повтори.")
+    problems = s.validate_provider_fields(prov, fields)
+    if problems:
+        return ("Платёж НЕ отправлен — реквизиты не проходят проверку банка:\n"
+                + "\n".join(f"- {p}" for p in problems)
+                + "\nРеквизиты, которые собрались:\n" + "\n".join(_legal_lines(fields)))
+
+    if not from_account:
+        raise ValueError("Нужен явный счёт списания")
+    pack = transfer_quote.quote(s, amount, from_account, 'transfer-legal', fields)
+    pack['from_qr'] = from_qr
+    return pack
+
+
 @mcp.tool()
 async def transfer_requisites(amount: float = 0, qr: str = "", comment: str = "",
                               account_number: str = "", bik: str = "", inn: str = "",
@@ -3082,7 +3143,7 @@ async def transfer_requisites(amount: float = 0, qr: str = "", comment: str = ""
                               force: bool = False, ctx: Context = None) -> str:
     """Перевод юрлицу или ИП по банковским реквизитам (БИК + счёт + ИНН).
     РЕАЛЬНЫЕ ДЕНЬГИ. Подтверждение — кнопка, не текст: тул сам покажет пользователю
-    «Перевести/Отмена» (для сумм от TBANK_CONFIRM_ABOVE) ДО отправки. НЕ спрашивай
+    «Перевести/Отмена» на любую сумму, независимо от TBANK_CONFIRM_ABOVE, ДО отправки. НЕ спрашивай
     «да/нет» заранее — покажи реквизиты и назначение (payment_qr для QR), потом
     вызывай; согласие даёт кнопка. Клиент без элиситации получает отказ
     «ПЛАТЁЖ НЕ ВЫПОЛНЕН» — деньги там не двигаются вообще.
@@ -3118,20 +3179,43 @@ async def transfer_requisites(amount: float = 0, qr: str = "", comment: str = ""
     # sync body refuses on a missing amount (from QR or arg), and the bank refuses
     # on a missing comment — same as before elicitation. The from_account picker
     # and the «Перевести/Отмена» gate below are input-free and stay.
+    # Validate the effective amount locally, before account lookup or capability
+    # refusal. A QR without Sum is input to correct, not a payment to confirm.
+    try:
+        effective = float(amount or 0)
+        if not effective and qr:
+            effective = float(client.parse_payment_qr(qr).get('amount') or 0)
+    except (TypeError, ValueError, TbankApiError) as e:
+        return _err(e)
+    if _payable_amount(effective) is None:
+        return ("В QR суммы нет, а amount не задан — передай amount=… явно."
+                if qr and not effective else
+                f"Сумма должна быть положительным числом, получено {effective!r}.")
+    if not _elicitation_available(ctx):
+        return _no_button_refusal()
     from_account, src_refusal = await _resolve_source(ctx, from_account)
     if src_refusal is not None:
         return src_refusal
-    # The gate runs BEFORE any journal write or HTTP: a decline must leave zero
-    # traces of a payment that never existed. It fires on force=True too — force
-    # overrides the duplicate guard, not the human's right to the button.
-    gate = await _transfer_gate(ctx, amount, qr, name)
-    if gate is not None:
-        return gate
-    # Sync HTTP stays off the event loop (async tools run ON it).
-    return await asyncio.to_thread(
-        _do_transfer_requisites, amount, qr, comment, account_number, bik, inn,
-        name, kpp, corr_account, bank_name, nds, personal_account, from_account,
-        force)
+    if not from_account:
+        try:
+            from_account = await asyncio.to_thread(lambda: _require()._source_account())
+        except Exception as e:
+            return _err_session(e)
+    from . import transfer_quote
+    args = (amount, qr, comment, account_number, bik, inn, name, kpp, corr_account,
+            bank_name, nds, personal_account, from_account)
+    try:
+        approved = await asyncio.to_thread(_legal_transfer_prepare, *args)
+        if isinstance(approved, str):
+            return approved
+        deadline = transfer_quote.monotonic() + 120
+        gate = await _money_gate(ctx, ("ПОВТОР ПОСЛЕ СВЕРКИ ОПЕРАЦИЙ. " if force else "") + transfer_quote.display(approved))
+        if gate is not None:
+            return gate
+        return await asyncio.to_thread(_do_transfer_requisites, *args, force, approved,
+                                       _expires_at=deadline)
+    except Exception as e:
+        return _err_session(e)
 
 
 def _do_transfer_requisites(amount: float = 0, qr: str = "", comment: str = "",
@@ -3139,7 +3223,7 @@ def _do_transfer_requisites(amount: float = 0, qr: str = "", comment: str = "",
                             name: str = "", kpp: str = "", corr_account: str = "",
                             bank_name: str = "", nds: str = "",
                             personal_account: str = "", from_account: str = "",
-                            force: bool = False) -> str:
+                            force: bool = False, _approved=None, _expires_at=None) -> str:
     try:
         import time
 
@@ -3187,6 +3271,14 @@ def _do_transfer_requisites(amount: float = 0, qr: str = "", comment: str = "",
         if hi is not None and amount > float(hi):
             return f"Максимальная сумма перевода по реквизитам — {_money(hi, 'RUB')}."
 
+        if _approved is not None:
+            from . import transfer_quote
+            current = transfer_quote.quote(s, amount, src, 'transfer-legal', fields)
+            current['from_qr'] = from_qr
+            if current != _approved:
+                return "Условия перевода изменились. Платёж не отправлен; нужно новое подтверждение."
+            if _expires_at is not None and transfer_quote.monotonic() >= _expires_at:
+                return "Подтверждение истекло. Платёж не отправлен; нужно новое подтверждение."
         key = _transfer_key(amount, fields.get("bankAcnt", ""), "transfer-legal", src)
         blocked, prev = _transfer_blocked(key)
         if blocked and not force:
@@ -3384,6 +3476,16 @@ async def pay_bill(provider_id: str, fields: str, amount: float, group: str = ""
     Неверный номер лицевого счёта оплачивает чужую квитанцию, и вернуть это
     сложнее, чем перевод. force=True — только если пользователь подтвердил, что
     предыдущий платёж не прошёл."""
+    if provider_id == "transfer-inner":
+        try:
+            vals = json.loads(fields)
+            if not isinstance(vals, dict) or set(vals) != {"bankContract"}:
+                return "Для внутреннего перевода нужны только bankContract и явный from_account."
+        except (TypeError, ValueError):
+            return "fields должен быть JSON-объектом с bankContract."
+        return "Для собственных счетов используй transfer_own с request_id исходного поручения."
+    if provider_id in {"p2p-anybank", "transfer-legal"}:
+        return "Для внешнего перевода используй transfer или transfer_requisites: там проверка получателя и одноразовое подтверждение точных условий."
     refusal = _button_required(ctx, amount)     # before the commission round-trip
     if refusal is not None:
         return refusal
@@ -3416,6 +3518,69 @@ async def pay_bill(provider_id: str, fields: str, amount: float, group: str = ""
         _pay_bill_execute, provider_id, prepared, amount, force)
 
 
+
+@mcp.tool()
+async def transfer_own(amount: float, from_account: str, to_account: str,
+                       request_id: str = "", ctx: Context = None) -> str:
+    """РЕАЛЬНЫЕ ДЕНЬГИ: между проверенными собственными Current/Saving RUB.
+
+    Без подтверждения в чате, только по конкретному поручению владельца.
+    request_id — стабильный id исходного поручения (например telegram:776201:9881).
+    Повтор того же id не списывает повторно; изменённые параметры отклоняются.
+    Только явные id из свежего list_accounts, без комиссии/кредитов/конвертации.
+    Неизвестный результат не повторять: payment_attempts и операции банка.
+    """
+    from . import own_transfer, own_requests
+    import fcntl
+    if not own_requests.valid_id(request_id):
+        return "Нужен request_id исходного поручения: telegram:<topic>:<message_id>. Не генерируй новый id при повторе."
+    lock_path = os.path.expanduser("~/.local/share/tbank-mcp/own-transfer.lock")
+    os.makedirs(os.path.dirname(lock_path), mode=0o700, exist_ok=True)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return "Уже выполняется внутренний перевод. Новый не отправлен."
+        identity = own_requests.identity(amount, from_account, to_account)
+        previous = own_requests.lookup(request_id, identity)
+        if previous is not None:
+            return previous
+        s = _require()
+        await asyncio.to_thread(s.ensure_fresh)
+        prepared = await asyncio.to_thread(own_transfer.prepare, s, from_account, to_account, amount)
+        # Persist intent BEFORE execution. A crash after this point fails closed.
+        own_requests.record(request_id, identity, "posting")
+        # Cancellation cannot unlock a POST still running in the worker thread.
+        # Keep the same process lock until the worker has a durable outcome.
+        execution = asyncio.create_task(asyncio.to_thread(
+            _pay_bill_execute, 'transfer-inner', prepared, amount, False))
+        cancelled = False
+        while not execution.done():
+            try:
+                await asyncio.shield(execution)
+            except asyncio.CancelledError:
+                cancelled = True
+        result = execution.result()
+        own_requests.record(request_id, identity, "finished", result)
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
+    except Exception as e:
+        return _err_session(e)
+    finally:
+        os.close(fd)
+
+
+@mcp.tool()
+async def banking_confirmation_test(ctx: Context = None) -> str:
+    """Безопасная проверка кнопок: без банковской сессии, HTTP банка и платежей."""
+    gate = await _money_gate(ctx,
+        "ПРОВЕРКА КНОПОК. Это не платёж. Сумма 0 RUB, счёт и получатель тестовые. "
+        "Нажмите подтверждение или отмену — деньги не двигаются.")
+    return gate or "Кнопка подтверждения получена. Тест завершён; обращений в банк и списаний не было."
+
+
 def _pay_bill_prepare(provider_id, fields, amount, group, from_account):
     """Read-only: parse fields, validate against the provider catalogue, pick the
     source account, quote the commission (= the bank's own envelope check). Returns
@@ -3440,6 +3605,10 @@ def _pay_bill_prepare(provider_id, fields, amount, group, from_account):
                     + ". Каталог сканируется максимум на 7 страниц (700 записей), "
                     "поэтому «не найден» без group не окончателен. "
                     "Список: payment_providers(group=\"…\").")
+        if str(prov.get('paymentType', '')).lower() == 'transfer':
+            return ("Перевод через общий pay_bill запрещён. Используй transfer, "
+                    "transfer_requisites или transfer_own: там проверяются "
+                    "получатель, точные условия и защита от повторов.")
         problems = s.validate_provider_fields(prov, vals)
         if problems:
             return ("Платёж НЕ отправлен — поля не проходят проверку провайдера "

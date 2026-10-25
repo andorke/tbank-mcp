@@ -99,11 +99,14 @@ class _AttemptCounter:
         return False
 
 
-def _check_untouched(s, tag):
+def _check_untouched(s, tag, *, quoted=False):
     """The fake session records every request it would have signed or read."""
     check(s.body is None, f"{tag}: /v1/pay must NOT be built or sent")
-    check(s.commission_body is None, f"{tag}: the commission must NOT be quoted")
-    check(s.bik_lookups == [], f"{tag}: no BIK lookup either: {s.bik_lookups}")
+    if not quoted:
+        check(s.commission_body is None, f"{tag}: the commission must NOT be quoted")
+        check(s.bik_lookups == [], f"{tag}: no BIK lookup either: {s.bik_lookups}")
+    else:
+        check(s.commission_body is not None, f"{tag}: the exact fee must be read before confirmation")
     check(_journal_blob().strip() == "", f"{tag}: zero journal writes expected")
 
 
@@ -157,9 +160,8 @@ def test_headless_below_threshold_still_pays():
             _reset_logs()
             s = LegalSession(fx)
             out = run_tool(s, server.transfer_requisites, amount=500, ctx=ctx, **_args(fx))
-            check("Отправлено" in out and "paymentId=" in out,
-                  f"{tag}: 500 < 1000 needs no button, must pay: {out}")
-            check(s.body is not None, f"{tag}: below the threshold /v1/pay must be sent")
+            _check_honest_refusal(out, f"{tag}: external transfers always need a button")
+            _check_untouched(s, tag)
             if ctx is not None:
                 check(ctx.asked == [], f"{tag}: nothing to elicit below the threshold")
 
@@ -171,7 +173,7 @@ def test_headless_below_threshold_still_pays():
             _check_untouched(s, f"{tag} at threshold")
     finally:
         _no_threshold()
-    print("  threshold: headless pays below it, is refused from it")
+    print("  external transfers: headless refused even below a configured threshold")
 
 
 # ---- 4. the threshold gates only from the configured amount ----------------
@@ -184,7 +186,7 @@ def test_threshold_gates_only_above():
         fctx = accept_ctx()
         run_tool(LegalSession(fx), server.transfer_requisites, amount=500,
                  ctx=fctx, **_args(fx))
-        check(fctx.asked == [], f"500 < 1000 must not elicit: {fctx.asked}")
+        check(len(fctx.asked) == 1, f"external transfer must always elicit: {fctx.asked}")
         _reset_logs()
         fctx = accept_ctx()
         run_tool(LegalSession(fx), server.transfer_requisites, amount=1500,
@@ -246,8 +248,8 @@ def test_decline_moves_nothing():
     s = LegalSession(fx)
     out = run_tool(s, server.transfer_requisites, amount=AMT,
                    ctx=decline_ctx(), **_args(fx))
-    _check_untouched(s, "decline")
-    check("отменён" in out and "деньги на месте" in out, f"honest refusal text: {out}")
+    _check_untouched(s, "decline", quoted=True)
+    check("Отменено" in out and "деньги на месте" in out, f"honest refusal text: {out}")
     check("НЕ выполнен" not in out, f"a decline is not a failure: {out}")
     check(REFUSAL_HEAD not in out, f"a decline is not the no-button refusal: {out}")
     print("  decline: no HTTP, no journal, honest text")
@@ -261,9 +263,9 @@ def test_cancel_and_error_move_nothing():
         _reset_logs()
         s = LegalSession(fx)
         out = run_tool(s, server.transfer_requisites, amount=AMT, ctx=fctx, **_args(fx))
-        _check_untouched(s, "cancel/error")
+        _check_untouched(s, "cancel/error", quoted=True)
         check(len(fctx.asked) == 1, "cancel/error: the user WAS asked exactly once")
-        check("не получено" in out and "НЕ отправлен" in out,
+        check("не получено" in out and "Ничего не сделано" in out,
               f"must say the confirmation was not received: {out}")
         check(REFUSAL_HEAD not in out,
               f"asked-but-unanswered is not the no-button refusal: {out}")
@@ -282,7 +284,7 @@ def test_qr_only_amount_still_gates():
     if fctx.asked:
         check("23 600.00" in fctx.asked[0][0],
               f"the question must carry the QR sum: {fctx.asked[0][0]}")
-    check(s.body is None and "отменён" in out, f"declined QR payment must stop: {out}")
+    check(s.body is None and "Отменено" in out, f"declined QR payment must stop: {out}")
 
     # Headless, the QR sum is what decides too: it needs the button → refusal.
     _reset_logs()

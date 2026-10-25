@@ -7,7 +7,7 @@ don't call `refresh_session` manually unless a tool returns SESSION EXPIRED.
 Served section-by-section by the `flows(topic)` tool — call it with no argument
 for the list of topics. Reading the whole file is rarely what you want.
 
-> **Tool names:** the **90 MCP tools** and their docstrings are the authoritative
+> **Tool names:** the **92 MCP tools** and their docstrings are the authoritative
 > interface. Some sections below describe INTERNAL api steps — e.g. the web
 > checkout + HMAC signing run INSIDE `grocery_checkout` / `transfer`. Call the MCP
 > tools, not the internal methods named in the prose (`pay`, `payment_gate_pay`,
@@ -641,7 +641,7 @@ back, and what the installment plans are. It changes nothing.
   redacted structured events to `~/.local/share/tbank-mcp/events.jsonl` (no
   secrets/PII). Call `diagnostics()` to reconstruct an attempt and find the last
   confirmed step.
-- Money tools — all eight — are REAL: `transfer`, `transfer_requisites`,
+- Money tools — all nine — are REAL: `transfer`, `transfer_own`, `transfer_requisites`,
   `pay_bill`, `grocery_checkout`, `ticket_pay`, `train_pay`, `flight_book`, and
   `confirm_payment` (which completes a payment the bank is holding for a second
   factor). The confirmation is the BUTTON the paying tools show themselves (see
@@ -651,6 +651,13 @@ back, and what the installment plans are. It changes nothing.
   (transfer_requisites), the cart contents (grocery_checkout), the seats + fee
   (ticket_pay), the car and berths (train_pay) or the fare, baggage and refund
   rules (flight_book) in text, then call.
+  Local owner-policy exception: `transfer_own` needs a concrete owner instruction
+  and a stable source-message request_id, but no extra chat confirmation. It only
+  accepts bank-verified own Current/Saving RUB accounts and zero commission;
+  persisted intent and a process lock prevent repeated debits. External transfers
+  always need the exact quoted approval, even below a configured threshold.
+  `banking_confirmation_test` is the non-spending UI probe; native acceptance is
+  not evidence of a human click unless channel delivery and answer are verified.
   `train_book` and `train_refund` are NOT in this list and show no button:
   the first only holds seats that lapse on their own, the second is a
   cancellation. `train_refund` still refuses to act without `confirm=True`, and

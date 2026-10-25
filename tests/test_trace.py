@@ -90,6 +90,16 @@ class Stub(MobileSession):
     def ensure_fresh(self, *a, **kw):
         return None
 
+    def payment_commission(self, body=None):
+        return {'value': {'value': 0},
+                'total': {'value': body['payParameters']['moneyAmount']}}
+
+    def list_accounts(self):
+        return []
+
+    def _call_read(self, *args, **kwargs):
+        raise AssertionError('Unstubbed read in an offline trace test')
+
 
 def run(session, fn, *a, **kw):
     saved = server._require
@@ -358,8 +368,10 @@ def test_a_refused_payment_is_not_filed_as_a_completed_one():
     # its own way, and both wordings must reach the file.
     run(Stub(resolve_recipient=RECIPIENT, list_accounts=account),
         server.transfer, 1000, "+79991234567", ctx=decline_ctx())
-    run(Stub(list_accounts=account), server.transfer_requisites, 1000,
-        name="ООО ТЕСТ", ctx=decline_ctx())
+    from test_requisites import LegalSession, fixture
+    run(LegalSession(fixture()), server.transfer_requisites, 1000,
+        from_account='1111111111', comment='Тест',
+        ctx=decline_ctx(), **fixture()['tool_args'])
     # A refusal that never even reaches the gate.
     run(Stub(), server.transfer, 0, "+79991234567")
     # A payee that is a NAME, not digits: _RE_LONG_ID cannot help here, and the
@@ -376,7 +388,7 @@ def test_a_refused_payment_is_not_filed_as_a_completed_one():
         ("transfer",            "ПЛАТЁЖ НЕ ВЫПОЛНЕН"),
         ("transfer_requisites", "ПЛАТЁЖ НЕ ВЫПОЛНЕН"),
         ("transfer",            "Отменено пользователем"),
-        ("transfer_requisites", "Перевод отменён пользователем"),
+        ("transfer_requisites", "Отменено пользователем"),
         ("transfer",            "Сумма должна быть положительным числом"),
         ("transfer_requisites", "ПОВТОР ЗАБЛОКИРОВАН"),
     ]

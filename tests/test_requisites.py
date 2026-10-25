@@ -170,7 +170,11 @@ class LegalSession(MobileSession):
             self.commission_body = (body or {}).get("payParameters")
             if self.commission_override is not None:
                 return self.commission_override
-            return json.loads(json.dumps(self.fx["commission_response"]))
+            q = json.loads(json.dumps(self.fx["commission_response"]))
+            # A bank quote prices THIS request, not the fixture's original amount.
+            amount = float((body or {}).get('payParameters', {}).get('moneyAmount', 0))
+            q['total']['value'] = amount + float(q['value']['value'])
+            return q
         if key == "bank_info":
             self.bik_lookups.append((overrides or {}).get("bik"))
             return json.loads(json.dumps(self.fx["bank_info"]))

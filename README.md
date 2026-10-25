@@ -13,7 +13,7 @@ The buttons register the `tbank-mcp` command — run `pip install tbank-mcp` fir
 
 ## Features
 
-- **90 tools**: accounts, cards, documents, operations, grocery ordering, cinema and
+- **92 tools**: accounts, cards, documents, operations, grocery ordering, cinema and
   concert tickets, train and flight booking, hotel search, orders, transfers
   (including payment by bank requisites, from a scanned invoice QR), messenger,
   investments
@@ -211,6 +211,25 @@ Claude Code (≥ 2.1.76) render it; Claude Desktop does not. See
 
 ## Tools
 
+### Local owner transfer policy (2026-10-25)
+
+`transfer_own(amount, from_account, to_account, request_id)` is the only
+confirmation-free money route. Both accounts must be live bank-listed Current
+or Saving RUB accounts, different, with sufficient balance, valid provider fields
+and a completed zero-fee quote. A concrete owner instruction is still required.
+The stable source-message `request_id` is deduplication, not authentication:
+persisted intent and a process lock prevent replay and fail closed after a crash.
+Never invent a fresh request id to retry an uncertain outcome.
+
+External `transfer` and `transfer_requisites` ALWAYS ask through MCP elicitation,
+regardless of `TBANK_CONFIRM_ABOVE`. The card names the exact amount, payer,
+bank-confirmed recipient/routing, fee, debit total and purpose. Terms are checked
+again after acceptance; a changed quote or a 120-second expiry requires a fresh
+approval. General `pay_bill` cannot bypass these transfer routes.
+`banking_confirmation_test()` exercises the same UI without a bank session or HTTP.
+Host permission policy must delegate ordinary MCP elicitations to the human;
+an auto-accepted SDK response alone does not prove the human saw a button.
+
 Each tool's docstring is the reference — this table is only a map of the surface.
 The docstrings, the skills and everything the tools print are in Russian: the bank is
 Russian and so is the person reading the answer.
@@ -234,7 +253,7 @@ Russian and so is the person reading the answer.
 | **Trips** | `trips`, `travel_payment_options`, `travel_ticket_file` |
 | **Marketplace** | `shop_search`, `shop_cart` |
 | **Messenger** | `messenger_conversations`, `messenger_messages`, `messenger_file`, `messenger_send`, `messenger_unread` |
-| **Money** | `transfer_sbp_resolve`, `transfer`, `payment_qr`, `transfer_requisites`, `payment_commission`, `pay_bill`, `payment_providers`, `confirm_payment`, `payment_status` |
+| **Money** | `transfer_sbp_resolve`, `transfer`, `transfer_own`, `payment_qr`, `transfer_requisites`, `payment_commission`, `pay_bill`, `payment_providers`, `confirm_payment`, `payment_status`, `banking_confirmation_test` |
 | **Invest** | `invest_accounts`, `invest_portfolio`, `invest_operations`, `invest_securities` |
 | **Utility** | `flows`, `diagnostics`, `debug_report` |
 
@@ -396,10 +415,10 @@ present the tests additionally check the fixtures have not drifted from it.
   second pending payment.
 - **Tool annotations.** Every tool declares what it does, in one table —
   `TOOL_KINDS` in `tbank_mcp/server.py` — and a tool missing from it raises at import
-  rather than defaulting to anything. Three kinds: 67 are `readOnlyHint: true` and
+  rather than defaulting to anything. Three kinds: 68 are `readOnlyHint: true` and
   may run without a prompt; 15 write something that costs nothing (a cart, a
   booking, a message, an OTP, a token, a local file) and are marked
-  `destructiveHint: false`; 8 debit an account — `transfer`, `transfer_requisites`,
+  `destructiveHint: false`; 9 debit an account — `transfer`, `transfer_own`, `transfer_requisites`,
   `grocery_checkout`, `ticket_pay`, `pay_bill`, `train_pay`, `flight_book`,
   `confirm_payment` — and are the only
   ones carrying `destructiveHint`, which

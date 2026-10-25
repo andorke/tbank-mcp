@@ -252,6 +252,10 @@ def test_an_unreadable_answer_leaves_the_outcome_unknown():
         def transfer(self, *a, **kw):
             raise UnreadableResponse("HTTP_200", "<html>…</html>")
 
+        def payment_commission(self, body=None):
+            return {'value': {'value': 0},
+                    'total': {'value': body['payParameters']['moneyAmount']}}
+
     open(os.environ["TBANK_ATTEMPTS"], "w").close()
     import asyncio
     saved = server._require

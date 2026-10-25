@@ -248,6 +248,10 @@ def test_the_resolved_name_reaches_both_the_signed_body_and_the_user():
                      "is_default_bank": True, "workflow_type": "SBPTransfer",
                      "is_tbank": False}]
 
+        def payment_commission(self, body=None):
+            amount = body['payParameters']['moneyAmount']
+            return {'value': {'value': 0}, 'total': {'value': amount}}
+
         def _call_signed(self, key, body_str, extra_query=None):
             import urllib.parse
             seen["pf"] = json.loads(
@@ -263,8 +267,8 @@ def test_the_resolved_name_reaches_both_the_signed_body_and_the_user():
               bank_member_id="1", pointer_link_id="2", from_account="1",
               ctx=accept_ctx())
 
-    check(seen.get("resolved") == 1,
-          f"the name lookup must happen — it fills the signed body: "
+    check(seen.get("resolved") == 2,
+          f"the name must be verified before and after confirmation: "
           f"{seen.get('resolved')}")
     check(seen["pf"].get("maskedFIO") == "И. И.",
           f"the resolved name must reach the SIGNED body: {seen['pf']!r}")
@@ -272,20 +276,20 @@ def test_the_resolved_name_reaches_both_the_signed_body_and_the_user():
           f"the name that went into the payment must appear in the line the user "
           f"reads before it: {out!r}")
 
-    # An explicitly passed name still wins — the caller may have shown the user a
-    # specific bank's holder and must not have it replaced.
+    # The live bank-confirmed holder, not a model-controlled display name, must
+    # reach the button and signed payment body.
     seen.clear()
     chosen = Named()
     open(os.environ["TBANK_ATTEMPTS"], "w").close()
     out2 = run(chosen, server.transfer, 12, "+79991234567",
                bank_member_id="1", pointer_link_id="2", masked_fio="Пётр П.",
                from_account="1", ctx=accept_ctx())
-    check("(Пётр П.)" in out2, f"an explicit name must win: {out2!r}")
-    check(seen.get("resolved") is None,
-          f"...and must not cost a lookup at all: {seen.get('resolved')}")
+    check("(И. И.)" in out2 and "Пётр П." not in out2,
+          f"the bank-confirmed name must win: {out2!r}")
+    check(seen.get("resolved") == 2,
+          f"the recipient must be rechecked after the button: {seen.get('resolved')}")
 
-    # A lookup that fails must not block a confirmed transfer, and must not invent
-    # a name for the signed body.
+    # An unavailable holder lookup cannot produce an exact approval card.
     seen.clear()
 
     class NoName(Named):
@@ -297,13 +301,9 @@ def test_the_resolved_name_reaches_both_the_signed_body_and_the_user():
     out3 = run(NoName(), server.transfer, 13, "+79991234567",
                bank_member_id="1", pointer_link_id="2", from_account="1",
                ctx=accept_ctx())
-    check("paymentId=1" in out3,
-          f"a failed NAME lookup must not stop a transfer whose routing is already "
-          f"decided by the two ids: {out3!r}")
-    check(seen["pf"].get("maskedFIO") == "",
-          f"...and must not invent a name for the signed body: {seen['pf']!r}")
-    print("  transfer: the name reaches the signed body AND the user's line; an "
-          "explicit one wins; a failed lookup neither blocks nor invents")
+    check("paymentId=1" not in out3 and "pf" not in seen,
+          f"failed verification must stop before any payment: {out3!r}")
+    print("  transfer: bank-confirmed holder reaches the card and signed body; lookup failure refuses")
 
 
 # ---- what made it uninvestigable ------------------------------------------

@@ -112,6 +112,10 @@ class TransferSession:
             return self.accounts[0]["id"]
         raise TbankApiError("NO_SOURCE_ACCOUNT", "нет счёта")
 
+    def payment_commission(self, body=None):
+        amount = float(body['payParameters']['moneyAmount'])
+        return {'unfinishedFlag': False, 'value': {'value': 0}, 'total': {'value': amount}}
+
     def transfer(self, amount, to_account, description, *, provider, bank_member_id,
                  masked_fio, pointer_link_id, account, user_payment_id):
         self.sent = {"amount": amount, "pointer_link_id": pointer_link_id,
@@ -746,9 +750,9 @@ def test_transfer_button_names_the_sum_and_the_payee():
     check(len(fctx.asked) == 1, f"one button expected: {fctx.asked}")
     if fctx.asked:
         msg, schema = fctx.asked[0]
-        check(msg == "Перевести 1 000.00 RUB → И. И. · Т-Банк?",
+        check("Перевести 1 000.00 RUB" in msg and "Получатель: И. И." in msg and "Банк: Т-Банк" in msg,
               f"the transfer button must name sum and payee: {msg!r}")
-        check(msg == f"Перевести {server._money(1000, 'RUB')} → И. И. · Т-Банк?",
+        check(f"Перевести {server._money(1000, 'RUB')}" in msg and "Комиссия:" in msg and "Всего:" in msg,
               f"the sum must be rendered by _money: {msg!r}")
         check(schema.model_json_schema().get("properties", {}) == {},
               f"the transfer gate must elicit no fields: {schema.model_json_schema()}")
@@ -836,7 +840,7 @@ def test_confirm_threshold_boundary_is_inclusive_everywhere():
         _reset()
         below = TransferSession(_one_default_bank()); ctx_below = accept_ctx()
         run_tool(below, server.transfer, 999.99, "+79991234567", ctx=ctx_below)
-        check(ctx_below.asked == [], f"transfer a kopeck below: no button: {ctx_below.asked}")
+        check(len(ctx_below.asked) == 1, f"external transfer always needs a button: {ctx_below.asked}")
         check(below.sent is not None, f"transfer below the threshold still pays: {below.sent}")
 
         # pay_bill's threshold applies to what LEAVES THE ACCOUNT (amount + fee),
