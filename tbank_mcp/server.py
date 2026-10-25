@@ -2838,8 +2838,9 @@ async def _transfer_impl(amount, to_account, description, provider, bank_member_
             await asyncio.to_thread(transfer_quote.own_source, s, from_account, amount)
         approved = await asyncio.to_thread(transfer_quote.p2p, s, amount, to_account,
             from_account, pointer_link_id, bank_member_id, description)
-        if own_phone and approved.get('unfinished') is not False:
-            return 'Банк не завершил расчёт перевода. Перевод не отправлен.'
+        # unfinishedFlag is not a payment readiness verdict. For phone routes,
+        # p2p() independently resolves the unique recipient and quote() checks
+        # exact positive amount, fee, total and limits. Recheck all terms below.
         if own_phone and approved['fee'] != '0.00':
             return 'Для перевода себе без кнопки нужна нулевая комиссия. Перевод не отправлен.'
         deadline = transfer_quote.monotonic() + 120

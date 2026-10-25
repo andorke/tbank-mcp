@@ -39,7 +39,8 @@ def p2p(session, amount, phone, source, pointer, bank, description):
         raise ValueError('Получатель не выбран: сначала transfer_sbp_resolve')
     matches = [x for x in session.resolve_recipient(phone)
                if str(x.get('bank_member_id') or '') == str(bank or '')]
-    if len(matches) != 1 or not matches[0].get('masked_fio'):
+    if (len(matches) != 1 or not matches[0].get('masked_fio')
+            or not matches[0].get('pointer_link_id')):
         raise ValueError('Банк не подтвердил выбранного получателя и маршрут')
     recipient = matches[0]
     fields = {'pointerType': client.SBP_PHONE_POINTER_TYPE,

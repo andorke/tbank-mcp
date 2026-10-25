@@ -8,6 +8,7 @@ from elicit_fake import FakeCtx
 
 PHONE = '+79990000000'
 class Bank:
+    unfinished = False
     fee = 0
     verified = True
     phone = PHONE
@@ -22,7 +23,7 @@ class Bank:
         return [dict(pointer_link_id='TEMP-' + str(self.tick), bank_member_id='BANK',
                      masked_fio='Тест Т.', bank_name='Банк', is_default_bank=True, is_tbank=False)]
     def payment_commission(self, body):
-        return dict(unfinishedFlag=False, value=self.fee, total=float(body['payParameters']['moneyAmount']) + self.fee)
+        return dict(unfinishedFlag=self.unfinished, value=self.fee, total=float(body['payParameters']['moneyAmount']) + self.fee)
 
 async def main():
     b = Bank()
@@ -61,24 +62,47 @@ async def main():
         assert not ctx.asked
         assert 'Повтор поручения' in await server.transfer(**args, ctx=ctx)
         assert pay.call_count == 2
+        # Live regression: fully resolved, exact zero-fee quote carries true.
+        b.unfinished = True
+        args['request_id'] = 'telegram:776201:10007'
+        before = pay.call_count
+        ctx = FakeCtx()
+        assert await server.transfer(**args, ctx=ctx) == 'PAID'
+        assert not ctx.asked and pay.call_count == before + 1
+        assert 'Повтор поручения' in await server.transfer(**args, ctx=ctx)
+        assert pay.call_count == before + 1
+        # Missing handle is NOT made safe by exact-looking monetary values.
+        original_resolve = b.resolve_recipient
+        b.resolve_recipient = lambda phone: [dict(original_resolve(phone)[0], pointer_link_id='')]
+        args['request_id'] = 'telegram:776201:10008'
+        assert 'Получатель не выбран' in await server.transfer(**args, ctx=ctx)
+        assert pay.call_count == before + 1 and not ctx.asked
+        b.resolve_recipient = original_resolve
+        # Invalid total cannot reach the executor even with resolved recipient.
+        original_quote = b.payment_commission
+        b.payment_commission = lambda body: dict(unfinishedFlag=True, value=0, total=2)
+        args['request_id'] = 'telegram:776201:10009'
+        assert 'итог' in await server.transfer(**args, ctx=ctx)
+        assert pay.call_count == before + 1 and not ctx.asked
+        b.payment_commission = original_quote
         # Different phone still needs the human button.
         b.phone = '+79991234576'; args['request_id'] = 'telegram:776201:10003'
         assert 'НЕ ВЫПОЛНЕН' in await server.transfer(**args)
-        assert pay.call_count == 2
+        assert pay.call_count == 3
         # External decline and changed fee cannot pay; rotated handle alone can.
         ctx = FakeCtx(action='decline')
         assert 'Отменено' in await server.transfer(**args, ctx=ctx)
-        assert pay.call_count == 2
+        assert pay.call_count == 3
         assert len(ctx.asked[-1][0]) < 240
         assert await server.transfer(**args, ctx=FakeCtx()) == 'PAID'
         b.phone = PHONE; b.fee = 1; args['request_id'] = 'telegram:776201:10004'
         assert 'нулевая комиссия' in await server.transfer(**args)
-        assert pay.call_count == 3
+        assert pay.call_count == 4
         # Ambiguous bank never silently picks a candidate.
         original = b.resolve_recipient
         b.resolve_recipient = lambda phone: original(phone) * 2
         args['request_id'] = 'telegram:776201:10005'
         assert 'Укажи банк' in await server.transfer(**args)
-        assert pay.call_count == 3
+        assert pay.call_count == 4
     print('self-phone UX: verified owner, deduplication, rotating handles, external consent, fee and ambiguity: PASS')
 asyncio.run(main())
