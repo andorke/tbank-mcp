@@ -750,9 +750,9 @@ def test_transfer_button_names_the_sum_and_the_payee():
     check(len(fctx.asked) == 1, f"one button expected: {fctx.asked}")
     if fctx.asked:
         msg, schema = fctx.asked[0]
-        check("Перевести 1 000.00 RUB" in msg and "Получатель: И. И." in msg and "Банк: Т-Банк" in msg,
+        check("Перевести 1 000.00 RUB" in msg and "→ И. И. · Т-Банк" in msg,
               f"the transfer button must name sum and payee: {msg!r}")
-        check(f"Перевести {server._money(1000, 'RUB')}" in msg and "Комиссия:" in msg and "Всего:" in msg,
+        check(f"Перевести {server._money(1000, 'RUB')}" in msg and "Комиссия " in msg and "Итого " in msg,
               f"the sum must be rendered by _money: {msg!r}")
         check(schema.model_json_schema().get("properties", {}) == {},
               f"the transfer gate must elicit no fields: {schema.model_json_schema()}")

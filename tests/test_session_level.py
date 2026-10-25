@@ -267,7 +267,7 @@ def test_the_resolved_name_reaches_both_the_signed_body_and_the_user():
               bank_member_id="1", pointer_link_id="2", from_account="1",
               ctx=accept_ctx())
 
-    check(seen.get("resolved") == 2,
+    check(seen.get("resolved") == 3,
           f"the name must be verified before and after confirmation: "
           f"{seen.get('resolved')}")
     check(seen["pf"].get("maskedFIO") == "И. И.",
@@ -286,7 +286,7 @@ def test_the_resolved_name_reaches_both_the_signed_body_and_the_user():
                from_account="1", ctx=accept_ctx())
     check("(И. И.)" in out2 and "Пётр П." not in out2,
           f"the bank-confirmed name must win: {out2!r}")
-    check(seen.get("resolved") == 2,
+    check(seen.get("resolved") == 3,
           f"the recipient must be rechecked after the button: {seen.get('resolved')}")
 
     # An unavailable holder lookup cannot produce an exact approval card.

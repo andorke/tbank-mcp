@@ -88,7 +88,7 @@ class ElicitationWireTests(unittest.IsolatedAsyncioTestCase):
         shown = peer.seen[0][0]
         for line in original.splitlines():
             self.assertIn(line, shown)
-        self.assertIn("120 секунд", shown)
+        self.assertLess(len(shown), 300)  # TTL enforced in execution, not UI boilerplate
 
 
 if __name__ == "__main__":

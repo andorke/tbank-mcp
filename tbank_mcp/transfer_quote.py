@@ -31,21 +31,20 @@ def quote(session, amount, source, provider, fields):
             if not bound.is_finite() or (amount < bound if lower else amount > bound):
                 raise ValueError('Сумма вне лимитов банка')
     return {'amount': format(amount, '.2f'), 'source': source, 'provider': provider,
-            'fields': dict(fields), 'fee': format(fee, '.2f'), 'total': format(total, '.2f')}
+            'unfinished': q.get('unfinishedFlag'), 'fields': dict(fields), 'fee': format(fee, '.2f'), 'total': format(total, '.2f')}
 
 
 def p2p(session, amount, phone, source, pointer, bank, description):
     if not pointer:
         raise ValueError('Получатель не выбран: сначала transfer_sbp_resolve')
     matches = [x for x in session.resolve_recipient(phone)
-               if str(x.get('pointer_link_id')) == str(pointer)
-               and str(x.get('bank_member_id') or '') == str(bank or '')]
+               if str(x.get('bank_member_id') or '') == str(bank or '')]
     if len(matches) != 1 or not matches[0].get('masked_fio'):
         raise ValueError('Банк не подтвердил выбранного получателя и маршрут')
     recipient = matches[0]
     fields = {'pointerType': client.SBP_PHONE_POINTER_TYPE,
               'pointer': client._normalize_phone(phone),
-              'maskedFIO': recipient['masked_fio'], 'pointerLinkId': pointer}
+              'maskedFIO': recipient['masked_fio'], 'pointerLinkId': recipient['pointer_link_id']}
     if bank:
         fields['bankMemberId'] = bank
     if description:
@@ -56,14 +55,53 @@ def p2p(session, amount, phone, source, pointer, bank, description):
     return pack
 
 
+def same_terms(a, b):
+    # pointerLinkId is a short-lived resolution handle, not the destination.
+    # Phone + bank + bank-returned name and every monetary term stay bound.
+    def stable(p):
+        p = dict(p); p['fields'] = dict(p['fields'])
+        p['fields'].pop('pointerLinkId', None)
+        return p
+    return stable(a) == stable(b)
+
+
+def verified_own_phone(session, phone):
+    try:
+        profile = session._call_userinfo()
+        return (profile.get('phone_number_verified') is True
+                and client._normalize_phone(profile.get('phone_number', ''))
+                == client._normalize_phone(phone))
+    except Exception:
+        return False
+
+
+def own_source(session, source, amount):
+    from decimal import Decimal
+    rows = [a for a in session.list_accounts() if str(a.get('id')) == source]
+    if len(rows) != 1:
+        raise ValueError('Счёт списания не подтверждён банком')
+    a = rows[0]
+    currency = a.get('currency')
+    if isinstance(currency, dict):
+        currency = currency.get('name')
+    if (a.get('accountType') not in ('Current', 'Saving') or currency != 'RUB'
+            or a.get('status') not in (None, 'NORM', 'ACTIVE', 'Active', 'Normal')):
+        raise ValueError('Без кнопки — только собственный рублёвый счёт, без кредита')
+    balance = Decimal(str((a.get('moneyAmount') or {}).get('value')))
+    if not balance.is_finite() or balance < money(amount):
+        raise ValueError('Недостаточно средств на выбранном счёте')
+
+
 def display(pack):
     from .server import _money
-    fields = pack['fields']
-    recipient = pack.get('recipient') or fields.get('addressee') or 'Получатель'
-    routing = fields.get('pointer') or fields.get('bankAcnt') or ''
-    bank = pack.get('bank') or fields.get('bankName') or fields.get('bankBik') or ''
-    return (f"Перевести {_money(pack['amount'], 'RUB')}\nСо счёта: {pack['source']}\n"
-            f"Получатель: {recipient}\nБанк: {bank}\nРеквизиты: {routing}\n"
-            f"Комиссия: {pack['fee']} RUB\nВсего: {pack['total']} RUB\n"
-            f"Назначение: {fields.get('comment') or fields.get('message') or '—'}\n"
-            "Одноразовое подтверждение, срок 120 секунд.")
+    f = pack['fields']
+    recipient = pack.get('recipient') or f.get('addressee') or 'Получатель'
+    route = f.get('pointer') or f.get('bankAcnt') or ''
+    bank = pack.get('bank') or f.get('bankName') or f.get('bankBik') or ''
+    text = (f"Перевести {_money(pack['amount'], 'RUB')} → {recipient} · {bank}"
+            f"\n{route} · Со счёта {pack['source']}"
+            f"\nКомиссия {pack['fee']} RUB · Итого {pack['total']} RUB")
+    purpose = f.get('comment') or f.get('message')
+    if purpose:
+        text += f"\n{purpose}"
+    return text

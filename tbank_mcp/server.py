@@ -2723,35 +2723,63 @@ async def transfer(amount: float, to_account: str, description: str = "",
                    provider: str = "p2p-anybank", bank_member_id: str = "",
                    masked_fio: str = "", pointer_link_id: str = "",
                    from_account: str = "", force: bool = False,
-                   ctx: Context = None) -> str:
-    """Перевод (РЕАЛЬНЫЕ ДЕНЬГИ). Подтверждение — кнопка, не текст: тул сам покажет
-    пользователю выбор банка (если их несколько) и кнопки «Перевести/Отмена»
-    на любую сумму, независимо от TBANK_CONFIRM_ABOVE. НЕ спрашивай «да/нет» заранее — вызывай, когда
-    сумма и получатель известны; согласие даёт кнопка. Клиент без элиситации
-    получает отказ «ПЛАТЁЖ НЕ ВЫПОЛНЕН» — деньги там не двигаются вообще.
+                   ctx: Context = None, request_id: str = "") -> str:
+    """Перевод реальных денег по телефону. Свой подтверждённый банком номер — без
+    кнопки, с request_id=telegram:<topic>:<message_id> для защиты от повтора.
+    Другому человеку — одна короткая карточка подтверждения; не спрашивай заранее.
+    Банк выбирается через bank_member_id из transfer_sbp_resolve; pointer_link_id
+    обновляется автоматически. from_account — выбранный счёт списания.
+    Между собственными счетами используй transfer_own; по реквизитам —
+    transfer_requisites. force не используй для неизвестного исхода.
+    """
+    from . import transfer_quote, own_requests
+    own = False
+    if own_requests.valid_id(request_id) and provider == 'p2p-anybank' and not force:
+        session = _require()
+        await asyncio.to_thread(session.ensure_fresh)
+        own = await asyncio.to_thread(transfer_quote.verified_own_phone, session, to_account)
+    if own and not from_account:
+        return 'Укажи счёт списания. Перевод не отправлен.'
+    if not own:
+        return await _transfer_impl(amount, to_account, description, provider,
+            bank_member_id, masked_fio, pointer_link_id, from_account, force, ctx)
+    import fcntl
+    lock_path = os.path.expanduser('~/.local/share/tbank-mcp/own-transfer.lock')
+    os.makedirs(os.path.dirname(lock_path), mode=0o700, exist_ok=True)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 'Уже выполняется перевод себе. Новый не отправлен.'
+        fingerprint = own_requests.identity(amount, from_account,
+            'phone:' + client._normalize_phone(to_account) + ':' + bank_member_id + ':' + description)
+        previous = own_requests.lookup(request_id, fingerprint)
+        if previous is not None:
+            return previous
+        own_requests.record(request_id, fingerprint, 'posting')
+        execution = asyncio.create_task(_transfer_impl(amount, to_account, description,
+            provider, bank_member_id, masked_fio, pointer_link_id, from_account, force, ctx, True))
+        cancelled = False
+        while not execution.done():
+            try:
+                await asyncio.shield(execution)
+            except asyncio.CancelledError:
+                cancelled = True
+        result = execution.result()
+        own_requests.record(request_id, fingerprint, 'finished', result)
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
+    except Exception as e:
+        return _err_session(e)
+    finally:
+        os.close(fd)
 
-    from_account — счёт списания из list_accounts(). Пусто = первый рублёвый Current
-    с положительным балансом; это ДОГАДКА, поэтому если пользователь выбирал счёт —
-    передай его явно, иначе спишется с другого. Кредитную карту как источник тоже
-    можно выбрать — она есть в окне выбора счёта или передаётся явно; по умолчанию
-    на неё НИКОГДА не встаёт.
-    phone/СБП (по умолчанию): to_account=телефон. Если pointer_link_id не передан —
-    получатель резолвится АВТОМАТИЧЕСКИ (transfer_sbp_resolve): выберется дефолтный
-    кандидат; при нескольких без дефолта вернётся RECIPIENT_MULTIPLE_BANKS со списком.
-    Перевод на счёт в Т-Банке (получатель — клиент Т-Банка): передай его
-    pointer_link_id, а bank_member_id оставь пустым — у внутреннего перевода его нет.
-    Между своими счетами: provider='transfer-inner' перенаправляет в transfer_own.
-    Только явные from_account/to_account, собственные Current/Saving RUB без комиссии.
-    Без кнопки только через transfer_own с request_id поручения. Live списание не проверено.
-    По юрлицу/ИП по реквизитам — это НЕ этот тул: девять полей реквизитов сюда не
-    помещаются. Бери transfer_requisites(amount, qr=…|account_number/bik/inn/name,
-    comment=…); прочитать QR со счёта — payment_qr(qr). transfer(...,
-    provider='transfer-legal') откажет и скажет то же самое.
-    description — сообщение получателю.
-    force=True — повторить перевод, который уже помечен как незавершённый. Только
-    после того, как пользователь ПРОВЕРИЛ в приложении, что деньги не ушли.
 
-    Возвращает paymentId — по нему потом payment_receipt(). Больше его взять негде."""
+async def _transfer_impl(amount, to_account, description, provider, bank_member_id,
+                         masked_fio, pointer_link_id, from_account, force, ctx,
+                         own_phone=False):
     if provider == "transfer-inner":
         return "Для собственных счетов используй transfer_own с request_id исходного поручения."
     # Not just «> 0»: NaN and ±inf make every float comparison below False, so a
@@ -2762,11 +2790,23 @@ async def transfer(amount: float, to_account: str, description: str = "",
     if _payable_amount(amount) is None:
         return (f"Сумма должна быть положительным числом, получено {amount!r}.")
     # No button possible → refuse before the recipient resolve round-trip.
-    if not _elicitation_available(ctx):
+    if not own_phone and not _elicitation_available(ctx):
         return _no_button_refusal()
     # Resolve the recipient (and let the human pick a bank) BEFORE the sync body
     # writes anything to the journal.
-    prep = await _transfer_prepare(ctx, amount, to_account, provider, pointer_link_id)
+    prep = {}
+    if bank_member_id or own_phone:
+        try:
+            candidates = await asyncio.to_thread(_require().resolve_recipient, to_account)
+            candidates = [x for x in candidates if str(x.get('bank_member_id') or '') == str(bank_member_id or '')]
+            if len(candidates) != 1:
+                return 'Укажи банк получателя: transfer_sbp_resolve. Перевод не отправлен.'
+            pick = candidates[0]
+            prep = {k: pick[k] for k in ('pointer_link_id', 'bank_member_id', 'masked_fio')}
+        except Exception as e:
+            return _err_session(e)
+    else:
+        prep = await _transfer_prepare(ctx, amount, to_account, provider, pointer_link_id)
     if isinstance(prep, str):
         return prep
     if prep:
@@ -2787,22 +2827,30 @@ async def transfer(amount: float, to_account: str, description: str = "",
     try:
         s = _require()
         await asyncio.to_thread(s.ensure_fresh)
+        if own_phone:
+            await asyncio.to_thread(transfer_quote.own_source, s, from_account, amount)
         approved = await asyncio.to_thread(transfer_quote.p2p, s, amount, to_account,
             from_account, pointer_link_id, bank_member_id, description)
+        if own_phone and approved.get('unfinished') is not False:
+            return 'Банк не завершил расчёт перевода. Перевод не отправлен.'
+        if own_phone and approved['fee'] != '0.00':
+            return 'Для перевода себе без кнопки нужна нулевая комиссия. Перевод не отправлен.'
         deadline = transfer_quote.monotonic() + 120
-        gate = await _money_gate(ctx, ("ПОВТОР ПОСЛЕ СВЕРКИ ОПЕРАЦИЙ. " if force else "") + transfer_quote.display(approved))
+        gate = None if own_phone else await _money_gate(ctx, ("ПОВТОР ПОСЛЕ СВЕРКИ ОПЕРАЦИЙ. " if force else "") + transfer_quote.display(approved))
         if gate is not None:
             return gate
         # Exact re-quote immediately before the existing journalled executor.
         current = await asyncio.to_thread(transfer_quote.p2p, s, amount, to_account,
             from_account, pointer_link_id, bank_member_id, description)
-        if current != approved:
+        if not transfer_quote.same_terms(current, approved):
             return "Условия перевода изменились. Платёж не отправлен; нужно новое подтверждение."
         if transfer_quote.monotonic() >= deadline:
             return "Подтверждение истекло. Платёж не отправлен; нужно новое подтверждение."
+        if own_phone and not await asyncio.to_thread(transfer_quote.verified_own_phone, s, to_account):
+            return 'Не удалось подтвердить свой номер. Перевод не отправлен.'
         return await asyncio.to_thread(
             _do_transfer, amount, to_account, description, provider, bank_member_id,
-            approved['recipient'], pointer_link_id, from_account, force)
+            current['recipient'], current['fields']['pointerLinkId'], from_account, force)
     except Exception as e:
         return _err_session(e)
 
